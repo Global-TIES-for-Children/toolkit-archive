@@ -1,0 +1,476 @@
+---
+title: <%= format(TITLE) %>
+author: "NYU GLOBAL TIES FOR CHILDREN"
+date: <%= format(Sys.time(), "%d %B, %Y") %>
+output:
+  word_document:
+    toc: yes
+    toc_depth: 1
+    reference_docx: <%= format(FORMAT.PATH) %>
+---
+
+
+
+```{r setup, message=FALSE,echo=FALSE,results='hide'}
+
+
+## Environment variables
+Sys.getenv("MASTERCODEBOOK","ASSESSMENTS","FINALNAMES")
+Sys.getenv("ITEMDES")
+Sys.getenv("CODING","SUBGROUP","SUBDESCRIPTION")
+Sys.getenv("LEAVEOUT","ADESCRIPTION","DROPCASE")
+Sys.getenv("DATABASE")
+Sys.getenv("PRESENCE.COL")
+Sys.getenv("GROUP")
+doc.type <- knitr::opts_knit$get('rmarkdown.pandoc.to')
+```
+
+
+```{r loadLibraries, echo=FALSE,message=FALSE,warning=FALSE}
+## Make sure that all packages that will be needed for the code to run are installed in this computer and loaded:
+check.and.install <- function(p){
+    needed.packages <- p[!(p %in% installed.packages()[,"Package"])]
+    ## Install missing packages
+    if(length(needed.packages)){ install.packages(needed.packages)}
+    ## Load all packages
+    for (i in 1:length(p)){
+        eval(parse(text=paste0("library(",p[i],")")))
+    }
+}
+
+p <- c("knitr","ggplot2","ggthemes","gridExtra","pander","crayon", "data.table", "digest")
+check.and.install(p)
+panderOptions('knitr.auto.asis', FALSE)
+
+"%not_in%" <- function(x,table)match(x,table,nomatch = 0)==0
+```
+
+
+```{r, results='asis', fig.align="center", echo=FALSE,warning=FALSE, error = FALSE, fig.width=12,message=FALSE}
+
+# Define a helper function that can redirect output for debugging
+cat2 <- function(..., output_pipe = stderr()) {
+    if (!is.null(output_pipe)) cat(..., file = output_pipe, append = TRUE)
+    
+    invisible(cat(...))
+}
+
+if(is.null(CODING)){
+  stop("Codebook column \"Coding\" not found", call. = FALSE)
+}else{
+    if((!is.null(CODING) & (CODING %not_in% names(MASTERCODEBOOK)))){
+      stop("Codebook column \"Coding\" not found", call. = FALSE)
+    }
+  }
+
+## Delete spaces in the edges
+MASTERCODEBOOK$IndexSections <- gsub("^[[:space:]]+|[[:space:]]+$|^[[:space:]]|[[:space:]]$","",MASTERCODEBOOK$IndexSections)
+
+## If, for whatever reason, whitespace in the coding column hasn't be converted to NA, do so.
+MASTERCODEBOOK[!is.na(MASTERCODEBOOK[[CODING]]) & grepl("^\\s*$", MASTERCODEBOOK[[CODING]]), CODING] <- NA
+
+## Make sure we're only looking for rows that actually correspond to existing variables in the final database
+MASTERCODEBOOK          <- MASTERCODEBOOK[!is.na(MASTERCODEBOOK[,FINALNAMES]),]
+MASTERCODEBOOK          <- MASTERCODEBOOK[!grepl("^$",MASTERCODEBOOK[,FINALNAMES]),]
+
+## The DROPCASE indicator can also help make sure we're not printing out any variables that didn't end up in the database
+if(!is.null(DROPCASE)){
+  MASTERCODEBOOK        <- MASTERCODEBOOK[!grepl("^Drop",MASTERCODEBOOK[,DROPCASE],ignore.case = T),]
+}
+
+## The PRESENCE.COL column helps the function determine which items from the mapping to include in codebooks meant for just ONE time-point
+## AND if a name of the element is provided, it is used for plotting (the name should match the wave tag of the items)
+if(!is.null(PRESENCE.COL)){
+  MASTERCODEBOOK        <- MASTERCODEBOOK[!is.na(MASTERCODEBOOK[,PRESENCE.COL]),]
+  MASTERCODEBOOK        <- MASTERCODEBOOK[!grepl("^$",MASTERCODEBOOK[,PRESENCE.COL]),]
+  if(!is.null(names(PRESENCE.COL))){
+  wave_tag <- names(PRESENCE.COL) 
+  }else{if(!is.null(DATABASE)){
+  print("If you want plots and descriptives, you need to specify the wave tag of the items that you want in your codebook, as it appears in the DATABASE you provided. Otherwise, don't specify a DATABASE.")
+  }
+  }
+  }
+
+
+if(!is.null(LEAVEOUT)){ ## ignore the items that are specific to a different year/codebook
+  MASTERCODEBOOK        <- MASTERCODEBOOK[!grepl(paste0(LEAVEOUT, collapse = "|"), MASTERCODEBOOK[, grepl("leaveout", names(MASTERCODEBOOK), ignore.case = TRUE)]), ]
+}
+
+## Subset the master codebook only to the assessments of interest
+ASSESSMENTS             <- unique(MASTERCODEBOOK$IndexSections[grepl(paste0(ASSESSMENTS,collapse = "|"),MASTERCODEBOOK$IndexSections)])
+MASTERCODEBOOK          <- MASTERCODEBOOK[MASTERCODEBOOK$IndexSections %in% ASSESSMENTS,]
+
+## Create an 0 variable that will be filled in on each loop with an indicator for whether to plot a new table or not
+MASTERCODEBOOK$DONTPLOT <- rep(0,nrow(MASTERCODEBOOK))
+
+
+########################################################################
+## Loop over the different groups of variables that you require a codebook for
+########################################################################
+for(g in ASSESSMENTS){
+    ## Print out a page break and then the group name
+    cat2("\n")
+    
+    cat2(paste0("###### Page Break"))
+    
+    cat2("\n")
+    cat2("_____")
+    cat2("\n")
+    
+    cat2(paste0("# ",g))
+    
+    cat2("\n")
+    cat2("_____")
+    cat2("\n")
+    
+    ## Subset the codebook again and keep only items for the group in the loop
+    SUBSET <- MASTERCODEBOOK[MASTERCODEBOOK$IndexSections==g,]
+    SUBSET <- SUBSET[!duplicated(SUBSET[[FINALNAMES]]), ]
+    n      <- nrow(SUBSET)
+    
+    ## If a Section description exists, then print it out
+    if(!is.null(ADESCRIPTION)){
+      if(!is.na(na.exclude(SUBSET[,ADESCRIPTION])[1])){
+        cat2(paste0(na.exclude(SUBSET[,ADESCRIPTION])[1]))
+        cat2("\n")
+      }
+    }
+    
+    if (n < 1L) {
+        cat(paste0("##### 🤯Requested assessment '", g, "' not found in codebook. Please check that the names you entered in the function match the name in your spreadsheet 'IndexSections' column. Skipping...\n"), sep = "")
+        next
+    }
+    
+    #####################################################################
+    ## Loop over each variable that belongs to that assessment (group/section) 
+    #####################################################################
+    for(v in 1:n){ 
+        ## Define an empty bullet object that will be used later
+        bullet <- ""
+        
+        ####################################################################
+        ## If the item belongs to a subgroup of items that share the *same coding*
+        is.sub <- !is.na(SUBSET[v,SUBGROUP]) & !grepl("^$|^[[:space:]]+$",SUBSET[v,SUBGROUP])
+        ##then print the name of the subgroup
+        ####################################################################
+        if(is.sub){
+            ## Print out the subgroup name, as long as it's not identical to the group/section name
+            if(SUBSET[v,SUBGROUP]!= g && SUBSET$DONTPLOT[v] == 0) {
+                cat2("\n")
+                cat2(paste0("## ",SUBSET[v,SUBGROUP]))
+                cat2("\n")
+
+                ## If the subgroup note exists, print it out
+                if(!is.null(SUBSET$SUB_NOTE)){
+                    cat2("\n")
+                    cat2(paste0("### ",SUBSET$SUB_NOTE[v]))
+                    cat2("\n")
+                }
+            }
+            ## We want to print out the items of the subgroup as a bullet list,
+            ## For which we create an object that will result in a bullet later on
+            bullet <- "+ "
+        }else{ 
+            ## If it doesn't belong to a subgroup
+            
+            bullet <- "###"
+            # ## Print out the variable name
+            # cat2("\n")
+            # cat2(paste0("###",SUBSET[v,FINALNAMES],": "))
+            # cat2("\n")
+            # ## Print out the question or description of the item
+            # cat2(paste0("*",SUBSET[v,ITEMDES],"*"))
+            # cat2("\n")
+        }
+        ####################################################################
+        ## If the variable is categorical
+        ####################################################################
+        is.cat <- SUBSET$Type[v] %in%
+            c("binary","ordered-categorical","unordered-categorical") &  ## If the item is categorical
+            SUBSET$DONTPLOT[v]==0                                        ## and the table hasn't been already plotted for the items of that group
+        
+        
+        
+        ####################################################################
+        ## Extract the item names that will get printed out later
+        ####################################################################
+        ## Reset the names object 
+        #names <- NULL
+        
+        if(is.sub){
+            ## Extract the names of the variables of the present subgroup
+            names <- SUBSET[SUBSET[,SUBGROUP]==SUBSET[v,SUBGROUP],FINALNAMES]
+        }else{
+            ## Extract the name of the variable of the present iteration
+            names <- SUBSET[v,FINALNAMES]
+        }
+        
+        ########################################################################################################
+        ## DEAL WITH EQUIVALENCES BETWEEN NAMES IN THE SPREADSHEET AND NAMES MODIFIED BY THE CLEANING FUNCTION
+        ########################################################################################################
+        
+        ### If a database was provided
+        if(!is.null(DATABASE) & SUBSET$DONTPLOT[v]==0 ){
+          names.in.data <- names
+          ## Which one isn't there
+          not.there <- names.in.data[! (names.in.data %in% names(DATABASE))]
+          
+          ### If we are looking for a single wave in a mapping file, we'll have to add the wave suffixes, as the cleaning function does...
+          if(length(not.there)>0){
+            ## They may be there but with corresponding wave tags
+                wave <- grepl(paste0(paste0("^",not.there,wave_tag,"$"),collapse = "|"), names(DATABASE))
+                if(any(wave)){
+                  roots <-  gsub(paste0(wave_tag,"$"),"",names(DATABASE)[wave])
+                  for(r in 1:length(roots)){
+                    names.in.data[names.in.data==roots[r]] <-   names(DATABASE)[wave][grepl(roots[r],names(DATABASE)[wave])]
+                  } ## End of loop
+                }
+            }
+            
+            not.there <- names.in.data[! (names.in.data %in% names(DATABASE))]
+            
+            ## OR They may be there but with corresponding GROUP tags
+            if(!is.null(GROUP)){
+              group.tag      <- SUBSET[1,GROUP]
+              
+              if(length(not.there)>0){
+                group.and.wave <- grepl(paste0(paste0(not.there,wave_tag),collapse = "|"), names(DATABASE)) & grepl(group.tag,names(DATABASE))
+                if(any(group.and.wave) ){
+                  roots <-  gsub(paste0(wave_tag,"|_",group.tag),"",names(DATABASE)[group.and.wave])
+                  for(r in 1:length(roots)){
+                     names.in.data[names.in.data==roots[r]] <-   names(DATABASE)[group.and.wave][grepl(roots[r],names(DATABASE)[group.and.wave])]
+                  } ## End of loop
+                }
+              }
+            } ## End GROUP condition
+            
+            ## Once more, update the mising items' object
+            not.there <- names.in.data[! (names.in.data %in% names(DATABASE))]
+            
+            ## Anything missing still?
+            if(length(not.there)>0 & SUBSET$DONTPLOT[v]==0){
+              ### Variables are not found in database with or without the wave tag
+              ### Print error if a variable is missing
+              cat("##### 🧐 Please check for inconsistencies between the database and the CSV codebook:")
+              cat2("\n")
+              cat(paste0("##### The variable ",not.there," is not in the database provided."))
+              cat2("\n")
+            }
+          } ## No database
+        
+        ########################################################################################################
+        ########################################################################################################
+        ## MOVE ON.....
+        ## DEAL WITH PLOTTING:
+        ########################################################################################################
+        
+        
+        ########################################################################################################
+        ## If a database is provided AND the item is continuous or ordered categorical, 
+        ## then a descriptive table and a plot can be created too
+        ########################################################################################################
+        if (!is.null(DATABASE)) {
+            is.plottable <- length(DATABASE)>0 & grepl("proportion|continuous|count|^ordered",SUBSET$Type[v],ignore.case = T) &
+                SUBSET$DONTPLOT[v]==0  ## If it has already been plotted then it's not considered plottable anymore
+        } else {
+            is.plottable <- FALSE
+        }
+        
+        ####################################################################
+        
+        if(is.plottable){
+            
+            ### If the item belonged to a subgroup then we also want to place all descriptives and plots together
+            ## But if the full subgroup has already been plotted we don't want to plot or tab
+            
+            ## Create a table large enough for all items of the subgroup
+            DES  <- matrix(NA,length(names),5)
+            colnames(DES) <-c("min","mean","median","sd","max")
+            P <- list()
+            
+            ###############################################################################################################
+            ###############################################################################################################
+            if(length(names)!=length(names.in.data)){stop("Wait, DEBUG: object 'names' and 'names in data' aren't the same length",call. = T)}
+            
+            for (n in 1:length(names)) {   ## Loop over elements of a subgroup
+              if (names.in.data[n]=="AGE") {
+                next
+              }  
+              
+                ## Print out the variable names as a list (with bullets)
+                ####################################################################
+                cat2("\n")
+                cat2(paste0(bullet," **",SUBSET[SUBSET[,FINALNAMES]==names[n],FINALNAMES],"** : "))
+                
+                ## Print out the question or description of the item
+                ####################################################################
+                cat2(paste0("*",SUBSET[SUBSET[,FINALNAMES]==names[n], ITEMDES  ],"*"))
+                cat2("\n")
+                
+                ### DESCRIPTIVES
+                DES[n,1] <- round(min(DATABASE[,names.in.data[n]],na.rm=T), digits = 2)
+                DES[n,2] <- round(mean(DATABASE[,names.in.data[n]],na.rm=T), digits = 2)
+                DES[n,3] <- round(median(DATABASE[,names.in.data[n]],na.rm=T), digits = 2)
+                DES[n,4] <- round(sd(DATABASE[,names.in.data[n]],na.rm=T), digits = 2)
+                DES[n,5] <- round(max(DATABASE[,names.in.data[n]],na.rm=T), digits = 2)
+                
+                ### HISTOGRAM
+                ### Create a space for all the plots for a determined subgroup
+                
+                ## First determine an appropriate ratio for the figures based on their ranges
+                max.freq   <- max(table(DATABASE[,names.in.data[n]]))
+                plot.ratio <- abs(DES[n,5]- DES[n,1])/max.freq
+                
+                P[[n]]   <- ggplot(DATABASE, aes_string(x=names.in.data[n])) + 
+                    geom_histogram(color="purple", fill="white") +
+                    theme_tufte(base_size = 9, base_family = "serif", ticks = TRUE) +
+                    coord_fixed(ratio=plot.ratio)
+            } ## closing n loop
+            rownames(DES) <- names
+            
+            ## Print descriptives
+            cat2("\n")
+            cat2("### Variable summary")
+            cat2("\n")
+            pander::pandoc.table(DES,keep.line.breaks=T,style = "grid")
+            
+            ## Print the histograms
+            cat2("\n")
+            
+            library(gtable)
+            library(grid)
+            
+            ## Set the plot organization and sizing for multiple plots
+            plot.cols <- 3
+            plot.rows <- ceiling(length(P)/plot.cols)
+            
+            
+            ## If the number of entries in the grob table is larger than the number of plots in P
+            ## then fill the remaining spaces with empty plots
+            empty.slots <- plot.cols*plot.rows-length(P)
+            if( empty.slots>0){
+                for(i in seq(length(P)+1,plot.cols*plot.rows,1)){
+                    P[[i]]  <- ggplot(DATABASE, aes_string(x=names.in.data[n])) +
+                        geom_blank()+ theme(axis.text.x=element_blank(),
+                                            panel.border = element_blank(), 
+                                            panel.grid.major = element_blank(),
+                                            panel.grid.minor = element_blank(),
+                                            panel.background = element_blank(),
+                                            axis.ticks.x=element_blank())+
+                        xlab("") + coord_fixed(ratio=plot.ratio)
+                }
+            }
+            
+            pl   <- lapply(P, ggplotGrob)
+            ROWS <-list()
+            for( i in 1:plot.rows){
+                ## Combine all the plots of the first row into one image
+                ROWS[[i]]         <- do.call(cbind,c(pl[(plot.cols*(i-1)+1):min(length(P),(plot.cols*i))],size="first"))
+                ## Specify the height of the resulting image based on the height of the first plot
+                ROWS[[i]]$heights <- eval(parse(text=paste0("grid::unit.pmax(",paste0(rep("pl[[1]][['heights']]",plot.cols),
+                                                                                      collapse = ","),")")))
+            }
+            
+            ## Combine all the "rows" of plots created in the loop into one big plot, IF there is more than one row of plots
+            if(plot.rows>1){
+                PL          <- do.call(rbind,c(ROWS,size="first"))
+                ## Specify the width of the resulting image based on the width of the first plot
+                PL$widths   <- eval(parse(text=paste0("grid::unit.pmax(",paste0(rep("ROWS[[1]][['widths']]",plot.rows),
+                                                                                collapse = ","),")")))
+            }else{PL <- ROWS[[1]]}
+            
+            grid.newpage()
+            grid.layout(ncol=1,heights = plot.rows*2)
+            #do.call("grid.draw",P)
+            ## Print out the plot
+            #do.call("grid.arrange",c(P,heights=rep(2,length(P))))
+            grid.draw(PL)
+            cat2("\n")
+            
+        } else { ## If the variable is NOT plottable and
+            ####################################################################
+            ## Belongs OR doesn't belong to a subgroup
+            if(SUBSET$DONTPLOT[v] == 0){
+                for(xn in 1:length(names)){   ## Loop over elements of a subgroup (xn can be 1 here)
+                    
+                    ## Print out the variable names as a list (with bullets)
+                    ####################################################################
+                    cat2("\n")
+                    cat2(paste0(bullet," **",SUBSET[SUBSET[[FINALNAMES]] == names[xn],FINALNAMES],"** : "))
+                    
+                    ## Print out the question or description of the item
+                    ####################################################################
+                    cat2(paste0("*",SUBSET[SUBSET[[FINALNAMES]] == names[xn],   ITEMDES],"*"))
+                    cat2("\n")
+                    } ## Closing n loop 
+                
+                if(is.cat &&                                                                     ## If the item is categorical
+                   !is.na(SUBSET[v,CODING]) && !grepl("^$|^[[:space:]]$",SUBSET[v,CODING])       ## and values & labels were provided in the CSV file
+                   ){
+                    
+                    ## Then, print out a table with the coding for each category
+                    pander::set.caption("",permanent = T)
+                    cat2("\n")
+                    cat2("### Variable coding")
+                    cat2("\n")
+
+                    # If this is a subgroup BUT not all the codings are the same, export the individual codings
+                    if (is.sub) {
+                        current_subgroup <- SUBSET[v, SUBGROUP]
+                        sgdt <- data.table::as.data.table(SUBSET[SUBSET[[SUBGROUP]] == current_subgroup, ])
+
+                        sgdt[, coding_hash := apply(.SD, 1L, function(x) digest::digest(eval(parse(text = as.character(x))))), .SDcols = CODING]
+
+                        if (sgdt[, length(unique(coding_hash))] == 1L) {
+                            pander::pandoc.table(eval(parse(text=as.character(SUBSET[v,CODING]))),
+                                                 col.names=c("VALUE","LABEL"),keep.line.breaks=T,style = "grid")
+                        } else {
+                            unique_codes <- sgdt[!is.na(sgdt[[CODING]]) | grepl("^\\s*$", sgdt[[CODING]]), unique(coding_hash)]
+
+                            for (uc in unique_codes) {
+                                cat("For the following variables:\n\n ", sgdt[coding_hash == uc, paste(paste0("+ ", .SD[[FINALNAMES]][!is.na(.SD[[FINALNAMES]])]), collapse = "\n")])
+                                cat("\n")
+                                outcode <- sgdt[uc, on = "coding_hash", mult = "first"][[CODING]]
+                                if (!(is.character(outcode) || length(outcode) == 1L)) {
+                                  browser()
+                                }
+                                cat("\n\n")
+                                pander::pandoc.table(eval(parse(text = outcode)),
+                                                     col.names=c("VALUE","LABEL"),keep.line.breaks=T,style = "grid")
+                                cat("\n\n")
+                            }
+                        }
+                    } else {
+                         cat("\n\n")
+                        pander::pandoc.table(eval(parse(text=as.character(SUBSET[v,CODING]))),
+                                             col.names=c("VALUE","LABEL"),keep.line.breaks=T,style = "grid")
+                    }
+                    
+                    cat2("\n\n")
+                }else{ ## If it was a categorical item but no coding was specified
+                    
+                    if(is.cat){                                      
+                        ## Then print a note:
+                        cat2("The coding for this variable was not specified in the CSV input file")
+                        cat2("\n")
+                    }
+                }
+                
+                cat2("\n")
+                
+            } ##Closing conditional statement for items of a group that has not been printed yet.
+            
+        } ## Finished printing names and tables for everything that is NOT prottable
+        
+        ## Then, if the item belonged to a subgroup that shared the same scale/coding, let's make sure that 
+        ## the table doesn't get printed for the next items of that group, by switching the DONTPLOT indicator
+        SUBSET$DONTPLOT[is.sub &                                                                    ## If a subgroup was specified for those variables
+                                    grepl(SUBSET[v,SUBGROUP], SUBSET[,SUBGROUP], fixed = TRUE)] <- 1  ## and if the Subgroup is the same as the variable
+        ## of the current iteration.
+        cat2("\n")
+        
+    } ## Closing loop for variables v within a group g
+    
+} ## Closing loop for groups of variables g
+```
+
